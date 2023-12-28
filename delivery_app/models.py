@@ -28,4 +28,6 @@ class DeliverySentForm(models.Model):
     customer_email = models.EmailField()
     delivery_address = models.TextField()
     delivery_date = models.DateField()
+    image = models.ImageField(upload_to='delivery_images/', blank=True, null=True)
+
 

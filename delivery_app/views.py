@@ -4,6 +4,9 @@ from django.conf import settings
 from twilio.rest import Client
 from .models import DeliveryRequest, DeliverySentForm
 from .serializers import UserSerializer,DeliveryRequestSerializer, DeliverySentFormSerializer
+from decouple import config
+from django.core.mail import EmailMessage
+from django.urls import reverse
 
 # User authentication
 from rest_framework import status
@@ -66,8 +69,10 @@ class DeliveryRequestViewSet(viewsets.ModelViewSet):
 
     def send_whatsapp_message(self, instance):
         # Your Twilio Account SID and Auth Token
-        account_sid = 'ACb5922573b89ddb0390647bc72f6db227'
-        auth_token = 'e1a3626ec3b28f06e5490c01df6b36a6'
+        account_sid = config('TWILIO_ACCOUNT_SID')
+        auth_token = config('TWILIO_AUTH_TOKEN')
+        twilio_whatsapp_number = config('TWILIO_WHATSAPP_NUMBER')
+
 
         # Comment the following line if you're not using a proxy
         # http_client = TwilioHttpClient(proxy={'http': settings.PROXY_URL, 'https': settings.PROXY_URL})
@@ -79,75 +84,98 @@ class DeliveryRequestViewSet(viewsets.ModelViewSet):
 
         # Send WhatsApp message
         message = client.messages.create(
-            from_='whatsapp:+14155238886',  # Replace with your Twilio sandbox WhatsApp number
+            from_=twilio_whatsapp_number,
             body=message_body,
-            to=f'whatsapp:+250785437037'
+            to=f'whatsapp:+250785437037'  # Replace with config('RECEIVER_PHONE_NUMBER')
         )
 
         print(f'WhatsApp message sent! SID: {message.sid}')
+
 
     def send_email_notification(self, instance):
         # Replace the placeholders with actual data from the instance
         subject = 'New Order Received'
         message = f'New order received!\nCustomer: {instance.customer_name}\nContact: {instance.contact_number}\nDelivery Date: {instance.delivery_date}'
-        from_email = 'djangodev05@gmail.com'
-        recipient_list = ['euphrosine46@gmail.com']
+
+        # Replace email addresses with environment variables
+        from_email = config('EMAIL_FROM')
+        recipient_list = [config('EMAIL_TO')]
 
         # Send email
         send_mail(subject, message, from_email, recipient_list)
 
         print('Email sent!')
 
+@authentication_classes([])
+@permission_classes([AllowAny])
 # Sent delivery
 class DeliverySentFormViewSet(viewsets.ModelViewSet):
     queryset = DeliverySentForm.objects.all()
     serializer_class = DeliverySentFormSerializer
 
     def perform_create(self, serializer):
-        instance = serializer.save()
+        # Handle image upload separately
+        image_file = self.request.data.get('image')
+        instance = serializer.save(image=image_file)
 
         # Send notifications
-        self.send_notifications(instance)
+        self.send_notifications(instance, image_data=image_file.read(), image_name=image_file.name)
+        
 
-    def send_notifications(self, instance):
+    def send_notifications(self, instance, image_data=None, image_name=None):
         # Send WhatsApp message and email notifications to the receiver
         receiver_notification_message = f"Your delivery request has been accepted. It is now being transported by {instance.transporter_name} ({instance.transporter_contact})."
-        self.send_whatsapp_message(instance.customer_contact, receiver_notification_message)
-        self.send_email_notification(instance.customer_email, receiver_notification_message)
+        self.send_whatsapp_message(instance.customer_contact, receiver_notification_message, image_data=image_data)
+        self.send_email_notification(instance.customer_email, receiver_notification_message, image_data=image_data, image_name=image_name)
 
         # Send email notifications to the order person
         order_person_notification_message = f"The delivery request from {instance.customer_name} has been sent. It is being transported by {instance.transporter_name} ({instance.transporter_contact}) to {instance.delivery_address}."
-        self.send_email_notification('djangodev05@gmail.com', order_person_notification_message)
+        self.send_email_notification('djangodev05@gmail.com', order_person_notification_message, image_data=image_data, image_name=image_name)
 
-    def send_whatsapp_message(self, contact_number, message):
+    def send_whatsapp_message(self, contact_number, message, image_data=None):
         # Your Twilio Account SID and Auth Token
-        account_sid = 'ACb5922573b89ddb0390647bc72f6db227'
-        auth_token = 'e1a3626ec3b28f06e5490c01df6b36a6'
+        account_sid = config('TWILIO_ACCOUNT_SID')
+        auth_token = config('TWILIO_AUTH_TOKEN')
+        twilio_whatsapp_number = config('TWILIO_WHATSAPP_NUMBER')
 
-        # Comment the following line if you're not using a proxy
-        # http_client = TwilioHttpClient(proxy={'http': settings.PROXY_URL, 'https': settings.PROXY_URL})
-        
-        client = Client(account_sid, auth_token)  # Remove http_client parameter
+        client = Client(account_sid, auth_token)
 
-        # Replace the placeholders with actual data from the instance
-        message_body = message
+        # Include image in the message if available
+        if image_data:
+            message += f'\nImage attached'
 
         # Send WhatsApp message
         message = client.messages.create(
-            from_='whatsapp:+14155238886',  # Replace with your Twilio sandbox WhatsApp number
-            body=message_body,
+            from_=twilio_whatsapp_number,
+            body=message,
             to=f'whatsapp:{contact_number}'
         )
         print(f'WhatsApp message sent to {contact_number}! SID: {message.sid}')
 
-    def send_email_notification(self, to_email, message):
+    def send_email_notification(self, to_email, message, image_data=None, image_name=None):
         # Replace the placeholders with actual data from the instance
         subject = 'Delivery Notification'
-        message = message
-        from_email = 'djangodev05@gmail.com'  # Replace with your email
+        from_email = config('EMAIL_FROM')
         recipient_list = [to_email]
 
+        # Create EmailMessage instance
+        email = EmailMessage(subject, message, from_email, recipient_list)
+
+        # Attach image to the email, if available
+        if image_data and image_name:
+            email.attach(image_name, image_data, 'image/png')  # Update the content type as per your image type
+
         # Send email
-        send_mail(subject, message, from_email, recipient_list)
+        email.send()
 
         print(f'Email sent to {to_email}!')
+
+
+from django.http import FileResponse
+from django.shortcuts import get_object_or_404
+from .models import DeliverySentForm
+
+def serve_uploaded_image(request, pk):
+    instance = get_object_or_404(DeliverySentForm, pk=pk)
+    response = FileResponse(instance.image)
+    return response
